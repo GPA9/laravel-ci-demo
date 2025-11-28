@@ -57,3 +57,58 @@ If you discover a security vulnerability within Laravel, please send an e-mail t
 ## License
 
 The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+
+## Deploying to Production (Laravel Cloud / generic Linux)
+
+If the app works locally but fails in production with an error like:
+
+```
+Database file at path [/var/www/html/database/database.sqlite] does not exist
+```
+
+follow these steps.
+
+- Environment variables (Laravel Cloud -> Settings / Environment):
+	- `APP_ENV=production`
+	- `APP_DEBUG=false`
+	- `DB_CONNECTION=sqlite`
+	- `DB_DATABASE=/var/www/html/database/database.sqlite`
+
+- Build / Deploy hooks (recommended for Laravel Cloud):
+	- Build step (install deps & build assets):
+
+```bash
+composer install --no-interaction --prefer-dist --optimize-autoloader
+npm ci
+npm run build
+```
+
+	- Post-deploy step (create sqlite file, generate APP_KEY, migrate, set permissions):
+
+```bash
+# from repo root on the server
+mkdir -p database
+touch database/database.sqlite
+php artisan key:generate --force
+php artisan migrate --force
+php artisan storage:link
+php artisan config:cache
+php artisan route:cache
+php artisan view:cache
+```
+
+- Alternatively, you can use the helper script included in this repo: `scripts/deploy.sh`.
+	Add this to your post-deploy hook in Laravel Cloud:
+
+```bash
+bash ./scripts/deploy.sh
+```
+
+- Permissions: ensure the web server user can write to `storage` and `bootstrap/cache`. The script sets common permissions but you may need to adapt ownership (e.g. `www-data`) on your provider.
+
+- Prefer managed DB for production: using SQLite in production is acceptable for simple demos, but for reliability use a managed MySQL/Postgres and set `DB_CONNECTION`, `DB_HOST`, etc.
+
+If you want, I can also:
+- add these commands to your Laravel Cloud hooks (I can provide exact text to paste), or
+- remove `database/database.sqlite` from the repo and always create it during deploy (recommended).
+

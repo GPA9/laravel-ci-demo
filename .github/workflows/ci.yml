@@ -35,7 +35,7 @@ jobs:
         # 'with' passa paràmetres a l'action.
         with:
           # Versió de PHP que volem al runner.
-          php-version: '8.2'
+          php-version: '8.4'
           # Llista d’extensions que necessitem al projecte.
           # mbstring i bcmath són habituals a Laravel; pdo_sqlite per fer tests amb SQLite.
           extensions: mbstring, bcmath, pdo_sqlite
