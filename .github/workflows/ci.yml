@@ -115,26 +115,40 @@ jobs:
               return;
             }
 
-            // 1) Comprovar si ja existeix un PR obert des d'aquesta branca cap a main
-            const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${headRef}`, base: 'main', state: 'open' });
-            let prNumber;
-            if (existing.data.length > 0) {
-              prNumber = existing.data[0].number;
-              core.info(`Found existing PR #${prNumber}`);
-            } else {
-              // 2) Crear un PR si no existeix
-              const pr = await github.rest.pulls.create({ owner, repo, head: headRef, base: 'main', title: `Auto PR: ${headRef} → main`, body: 'Pull request creado automáticamente por CI.' });
-              prNumber = pr.data.number;
-              core.info(`Created PR #${prNumber}`);
-            }
-
-            // 3) Intentar habilitar auto-merge (usar GraphQL). Si falla, loguear el error.
             try {
-              const prGet = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-              const pullRequestId = prGet.data.node_id;
-              const mutation = `mutation($pullRequestId: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: MERGE}) { pullRequest { number } } }`;
-              await github.graphql(mutation, { pullRequestId });
-              core.info('Auto-merge enabled for PR #' + prNumber);
+              // 1) Comprovar si ja existeix un PR obert des d'aquesta branca cap a main
+              const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${headRef}`, base: 'main', state: 'open' });
+              let prNumber;
+              if (existing.data.length > 0) {
+                prNumber = existing.data[0].number;
+                core.info(`Found existing PR #${prNumber}`);
+              } else {
+                // 2) Crear un PR si no existeix
+                const pr = await github.rest.pulls.create({ owner, repo, head: headRef, base: 'main', title: `Auto PR: ${headRef} → main`, body: 'Pull request creado automáticamente por CI.' });
+                prNumber = pr.data.number;
+                core.info(`Created PR #${prNumber}`);
+              }
+
+              // 3) Intentar habilitar auto-merge (usar GraphQL). Si falla, loguear el error.
+              try {
+                const prGet = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+                const pullRequestId = prGet.data.node_id;
+                const mutation = `mutation($pullRequestId: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: MERGE}) { pullRequest { number } } }`;
+                await github.graphql(mutation, { pullRequestId });
+                core.info('Auto-merge enabled for PR #' + prNumber);
+              } catch (err) {
+                core.warning('Could not enable auto-merge: ' + err.message);
+              }
             } catch (err) {
-              core.warning('Could not enable auto-merge: ' + err.message);
+              // Si GitHub bloquea la creación de PRs con GITHUB_TOKEN, capturamos el 403 y damos instrucciones.
+              const status = err.status || (err.response && err.response.status);
+              if (status === 403) {
+                core.warning('Failed to create PR: GitHub Actions is not permitted to create pull requests with the current token.');
+                core.warning('Options to fix:');
+                core.warning('1) In repository Settings → Actions → General set "Workflow permissions" to "Read and write" and allow Actions to create and approve PRs.');
+                core.warning('2) Or create a Personal Access Token (PAT) with `repo` scope and save it as repository secret `PR_TOKEN`.');
+                core.warning('After adding the secret, re-run the workflow (the job uses `PR_TOKEN` if present).');
+                return;
+              }
+              throw err;
             }
