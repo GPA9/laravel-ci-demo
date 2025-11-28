@@ -94,6 +94,10 @@ jobs:
     # Només cal executar si l'esdeveniment és un push i la branca no és `main`.
     if: github.event_name == 'push' && github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Compute a token to use: prefer a repository secret `PR_TOKEN` (PAT),
+    # otherwise fall back to the built-in `GITHUB_TOKEN`.
+    env:
+      PR_ACT_TOKEN: ${{ secrets.PR_TOKEN && secrets.PR_TOKEN || github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -101,6 +105,8 @@ jobs:
       - name: Create or find PR and enable auto-merge
         uses: actions/github-script@v7
         with:
+          # Use PR_ACT_TOKEN computed above (falls back to GITHUB_TOKEN)
+          github-token: ${{ env.PR_ACT_TOKEN }}
           script: |
             const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
             const headRef = process.env.GITHUB_REF.replace('refs/heads/', '');
@@ -109,26 +115,61 @@ jobs:
               return;
             }
 
-            // 1) Comprovar si ja existeix un PR obert des d'aquesta branca cap a main
-            const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${headRef}`, base: 'main', state: 'open' });
-            let prNumber;
-            if (existing.data.length > 0) {
-              prNumber = existing.data[0].number;
-              core.info(`Found existing PR #${prNumber}`);
-            } else {
-              // 2) Crear un PR si no existeix
-              const pr = await github.rest.pulls.create({ owner, repo, head: headRef, base: 'main', title: `Auto PR: ${headRef} → main`, body: 'Pull request creado automáticamente por CI.' });
-              prNumber = pr.data.number;
-              core.info(`Created PR #${prNumber}`);
-            }
-
-            // 3) Intentar habilitar auto-merge (usar GraphQL). Si falla, loguear el error.
             try {
-              const prGet = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-              const pullRequestId = prGet.data.node_id;
-              const mutation = `mutation($pullRequestId: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: MERGE}) { pullRequest { number } } }`;
-              await github.graphql(mutation, { pullRequestId });
-              core.info('Auto-merge enabled for PR #' + prNumber);
+              // 1) Comprovar si ja existeix un PR obert des d'aquesta branca cap a main
+              const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${headRef}`, base: 'main', state: 'open' });
+              let prNumber;
+              if (existing.data.length > 0) {
+                prNumber = existing.data[0].number;
+                core.info(`Found existing PR #${prNumber}`);
+              } else {
+                // 2) Crear un PR si no existeix
+                const pr = await github.rest.pulls.create({ owner, repo, head: headRef, base: 'main', title: `Auto PR: ${headRef} → main`, body: 'Pull request creado automáticamente por CI.' });
+                prNumber = pr.data.number;
+                core.info(`Created PR #${prNumber}`);
+              }
+
+              // 3) Esperar a que el PR esté en estado 'clean' (mergeable_state == 'clean') antes de habilitar auto-merge.
+              // Esto evita errores intermitentes como "Pull request is in unstable status".
+              try {
+                const maxAttempts = 12; // ~2 minutes if interval = 10s
+                const intervalMs = 10000;
+                let attempt = 0;
+                let prGet = null;
+                let mergeableState = null;
+                while (attempt < maxAttempts) {
+                  prGet = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+                  mergeableState = prGet.data.mergeable_state;
+                  core.info(`Attempt ${attempt + 1}/${maxAttempts}: mergeable_state=${mergeableState}`);
+                  if (mergeableState === 'clean') {
+                    break;
+                  }
+                  // If GitHub hasn't computed mergeability yet, retry.
+                  await new Promise(resolve => setTimeout(resolve, intervalMs));
+                  attempt++;
+                }
+
+                if (mergeableState === 'clean') {
+                  const pullRequestId = prGet.data.node_id;
+                  const mutation = `mutation($pullRequestId: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: MERGE}) { pullRequest { number } } }`;
+                  await github.graphql(mutation, { pullRequestId });
+                  core.info('Auto-merge enabled for PR #' + prNumber);
+                } else {
+                  core.warning('Could not enable auto-merge: Pull request is in unstable state (' + mergeableState + ').');
+                }
+              } catch (err) {
+                core.warning('Could not enable auto-merge: ' + err.message);
+              }
             } catch (err) {
-              core.warning('Could not enable auto-merge: ' + err.message);
+              // Si GitHub bloquea la creación de PRs con GITHUB_TOKEN, capturamos el 403 y damos instrucciones.
+              const status = err.status || (err.response && err.response.status);
+              if (status === 403) {
+                core.warning('Failed to create PR: GitHub Actions is not permitted to create pull requests with the current token.');
+                core.warning('Options to fix:');
+                core.warning('1) In repository Settings → Actions → General set "Workflow permissions" to "Read and write" and allow Actions to create and approve PRs.');
+                core.warning('2) Or create a Personal Access Token (PAT) with `repo` scope and save it as repository secret `PR_TOKEN`.');
+                core.warning('After adding the secret, re-run the workflow (the job uses `PR_TOKEN` if present).');
+                return;
+              }
+              throw err;
             }
