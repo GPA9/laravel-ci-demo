@@ -129,13 +129,34 @@ jobs:
                 core.info(`Created PR #${prNumber}`);
               }
 
-              // 3) Intentar habilitar auto-merge (usar GraphQL). Si falla, loguear el error.
+              // 3) Esperar a que el PR esté en estado 'clean' (mergeable_state == 'clean') antes de habilitar auto-merge.
+              // Esto evita errores intermitentes como "Pull request is in unstable status".
               try {
-                const prGet = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-                const pullRequestId = prGet.data.node_id;
-                const mutation = `mutation($pullRequestId: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: MERGE}) { pullRequest { number } } }`;
-                await github.graphql(mutation, { pullRequestId });
-                core.info('Auto-merge enabled for PR #' + prNumber);
+                const maxAttempts = 12; // ~2 minutes if interval = 10s
+                const intervalMs = 10000;
+                let attempt = 0;
+                let prGet = null;
+                let mergeableState = null;
+                while (attempt < maxAttempts) {
+                  prGet = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+                  mergeableState = prGet.data.mergeable_state;
+                  core.info(`Attempt ${attempt + 1}/${maxAttempts}: mergeable_state=${mergeableState}`);
+                  if (mergeableState === 'clean') {
+                    break;
+                  }
+                  // If GitHub hasn't computed mergeability yet, retry.
+                  await new Promise(resolve => setTimeout(resolve, intervalMs));
+                  attempt++;
+                }
+
+                if (mergeableState === 'clean') {
+                  const pullRequestId = prGet.data.node_id;
+                  const mutation = `mutation($pullRequestId: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: MERGE}) { pullRequest { number } } }`;
+                  await github.graphql(mutation, { pullRequestId });
+                  core.info('Auto-merge enabled for PR #' + prNumber);
+                } else {
+                  core.warning('Could not enable auto-merge: Pull request is in unstable state (' + mergeableState + ').');
+                }
               } catch (err) {
                 core.warning('Could not enable auto-merge: ' + err.message);
               }
