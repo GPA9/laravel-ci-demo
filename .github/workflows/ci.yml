@@ -3,14 +3,18 @@ name: CI (Laravel)
 
 # Bloc que defineix QUAN s’executa el workflow.
 on:
-  # 1) Es dispara en fer push...
+  # 1) Se dispara en push a cualquier rama (necesario para detectar pushes desde ramas de trabajo).
   push:
-    # ...però només si el push va a la branca 'main'.
-    # YAML permet arrays en una sola línia: [ main ] és equivalent a una llista amb un element.
-    branches: [ main ]
-  # 2) També es dispara quan s’obre/actualitza un pull request.
-  # No especifiquem branques aquí, per tant s’aplica a PRs entre qualsevol branca.
+    branches: [ '**' ]
+  # 2) También se dispara cuando se abre/actualiza un pull request.
   pull_request:
+
+# Permisos necesarios para crear PRs y habilitar auto-merge mediante la API.
+# `pull-requests: write` permite crear PRs; `checks: write` y `contents: write` ayudan con operaciones relacionadas.
+permissions:
+  contents: write
+  pull-requests: write
+  checks: write
 
 # Bloc de feines (jobs) que s’executaran.
 jobs:
@@ -81,3 +85,50 @@ jobs:
         # --no-coverage: no calculem cobertura (més ràpid per a una demo bàsica).
         # (Laravel invoca PHPUnit o Pest segons la config del projecte.)
         run: php artisan test --no-coverage
+
+  # Job que crea (si cal) un Pull Request de la branca actual cap a `main`
+  # i habilita l'auto-merge perquè GitHub faci el merge automàtic quan passin els checks.
+  create_pr:
+    # Espera a que el job de tests acabi satisfactoriament.
+    needs: tests
+    # Només cal executar si l'esdeveniment és un push i la branca no és `main`.
+    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create or find PR and enable auto-merge
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+            const headRef = process.env.GITHUB_REF.replace('refs/heads/', '');
+            if (headRef === 'main') {
+              core.info('Branch is main; skipping PR creation.');
+              return;
+            }
+
+            // 1) Comprovar si ja existeix un PR obert des d'aquesta branca cap a main
+            const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${headRef}`, base: 'main', state: 'open' });
+            let prNumber;
+            if (existing.data.length > 0) {
+              prNumber = existing.data[0].number;
+              core.info(`Found existing PR #${prNumber}`);
+            } else {
+              // 2) Crear un PR si no existeix
+              const pr = await github.rest.pulls.create({ owner, repo, head: headRef, base: 'main', title: `Auto PR: ${headRef} → main`, body: 'Pull request creado automáticamente por CI.' });
+              prNumber = pr.data.number;
+              core.info(`Created PR #${prNumber}`);
+            }
+
+            // 3) Intentar habilitar auto-merge (usar GraphQL). Si falla, loguear el error.
+            try {
+              const prGet = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+              const pullRequestId = prGet.data.node_id;
+              const mutation = `mutation($pullRequestId: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: MERGE}) { pullRequest { number } } }`;
+              await github.graphql(mutation, { pullRequestId });
+              core.info('Auto-merge enabled for PR #' + prNumber);
+            } catch (err) {
+              core.warning('Could not enable auto-merge: ' + err.message);
+            }
