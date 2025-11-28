@@ -85,7 +85,6 @@ jobs:
         # --no-coverage: no calculem cobertura (més ràpid per a una demo bàsica).
         # (Laravel invoca PHPUnit o Pest segons la config del projecte.)
         # DESCOMENTA la línea siguiente para FORZAR QUE LOS TESTS FALLEN (para pruebas de CI):
-        # run: php artisan test --no-coverage && exit 1
         run: php artisan test --no-coverage
 
   # Job que crea (si cal) un Pull Request de la branca actual cap a `main`
