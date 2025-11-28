@@ -104,73 +104,55 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Create or find PR and enable auto-merge
-        uses: actions/github-script@v7
-        with:
-          # Use PR_ACT_TOKEN computed above (falls back to GITHUB_TOKEN)
-          github-token: ${{ env.PR_ACT_TOKEN }}
-          script: |
-            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
-            const headRef = process.env.GITHUB_REF.replace('refs/heads/', '');
-            if (headRef === 'main') {
-              core.info('Branch is main; skipping PR creation.');
-              return;
-            }
-
-            try {
-              // 1) Comprovar si ja existeix un PR obert des d'aquesta branca cap a main
-              const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${headRef}`, base: 'main', state: 'open' });
-              let prNumber;
-              if (existing.data.length > 0) {
-                prNumber = existing.data[0].number;
-                core.info(`Found existing PR #${prNumber}`);
-              } else {
-                // 2) Crear un PR si no existeix
-                const pr = await github.rest.pulls.create({ owner, repo, head: headRef, base: 'main', title: `Auto PR: ${headRef} → main`, body: 'Pull request creado automáticamente por CI.' });
-                prNumber = pr.data.number;
-                core.info(`Created PR #${prNumber}`);
+        env:
+          GH_TOKEN: ${{ env.PR_ACT_TOKEN }}
+        shell: bash
+        run: |
+          set -e
+          
+          HEAD_REF="${GITHUB_REF#refs/heads/}"
+          
+          if [ "$HEAD_REF" = "main" ]; then
+            echo "Branch is main; skipping PR creation."
+            exit 0
+          fi
+          
+          # 1) Check if PR already exists
+          PR_JSON=$(gh pr list --head "$HEAD_REF" --base main --state open --json number,title --jq '.[0]' 2>/dev/null || echo "{}")
+          PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number // empty')
+          
+          if [ -z "$PR_NUMBER" ]; then
+            # 2) Create PR if it doesn't exist
+            PR_NUMBER=$(gh pr create --head "$HEAD_REF" --base main --title "Auto PR: $HEAD_REF → main" --body "Pull request creado automáticamente por CI." --json number --jq '.number')
+            echo "Created PR #$PR_NUMBER"
+          else
+            echo "Found existing PR #$PR_NUMBER"
+          fi
+          
+          # 3) Enable auto-merge using gh CLI (more reliable than GraphQL mutation)
+          # Poll until mergeable_state is clean, then enable auto-merge
+          MAX_ATTEMPTS=12
+          INTERVAL=10
+          ATTEMPT=0
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            MERGEABLE_STATE=$(gh pr view "$PR_NUMBER" --json mergeableState --jq '.mergeableState' 2>/dev/null || echo "unknown")
+            echo "Attempt $((ATTEMPT+1))/$MAX_ATTEMPTS: mergeable_state=$MERGEABLE_STATE"
+            
+            if [ "$MERGEABLE_STATE" = "MERGEABLE" ]; then
+              # Enable auto-merge with 'merge' method
+              gh pr merge "$PR_NUMBER" --auto --merge || {
+                echo "Warning: Could not enable auto-merge; PR might need to be merged manually."
               }
-
-              // 3) Esperar a que el PR esté en estado 'clean' (mergeable_state == 'clean') antes de habilitar auto-merge.
-              // Esto evita errores intermitentes como "Pull request is in unstable status".
-              try {
-                const maxAttempts = 12; // ~2 minutes if interval = 10s
-                const intervalMs = 10000;
-                let attempt = 0;
-                let prGet = null;
-                let mergeableState = null;
-                while (attempt < maxAttempts) {
-                  prGet = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-                  mergeableState = prGet.data.mergeable_state;
-                  core.info(`Attempt ${attempt + 1}/${maxAttempts}: mergeable_state=${mergeableState}`);
-                  if (mergeableState === 'clean') {
-                    break;
-                  }
-                  // If GitHub hasn't computed mergeability yet, retry.
-                  await new Promise(resolve => setTimeout(resolve, intervalMs));
-                  attempt++;
-                }
-
-                if (mergeableState === 'clean') {
-                  const pullRequestId = prGet.data.node_id;
-                  const mutation = `mutation($pullRequestId: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: MERGE}) { pullRequest { number } } }`;
-                  await github.graphql(mutation, { pullRequestId });
-                  core.info('Auto-merge enabled for PR #' + prNumber);
-                } else {
-                  core.warning('Could not enable auto-merge: Pull request is in unstable state (' + mergeableState + ').');
-                }
-              } catch (err) {
-                core.warning('Could not enable auto-merge: ' + err.message);
-              }
-            } catch (err) {
-              // Si GitHub bloquea la creación de PRs con GITHUB_TOKEN, capturamos el 403 y damos instrucciones.
-              const status = err.status || (err.response && err.response.status);
-              if (status === 403) {
-                core.warning('Failed to create PR: GitHub Actions is not permitted to create pull requests with the current token.');
-                core.warning('Options to fix:');
-                core.warning('1) In repository Settings → Actions → General set "Workflow permissions" to "Read and write" and allow Actions to create and approve PRs.');
-                core.warning('2) Or create a Personal Access Token (PAT) with `repo` scope and save it as repository secret `PR_TOKEN`.');
-                core.warning('After adding the secret, re-run the workflow (the job uses `PR_TOKEN` if present).');
-                return;
-              }
-              throw err;
-            }
+              echo "Auto-merge enabled for PR #$PR_NUMBER"
+              exit 0
+            fi
+            
+            ATTEMPT=$((ATTEMPT+1))
+            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+              sleep $INTERVAL
+            fi
+          done
+          
+          echo "Warning: PR #$PR_NUMBER did not reach mergeable state after polling. State: $MERGEABLE_STATE"
+          echo "You may need to manually merge the PR or check branch protection rules."
