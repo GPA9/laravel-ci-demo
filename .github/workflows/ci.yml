@@ -2,7 +2,7 @@ name: CI (Laravel)
 
 on:
   push:
-    branches: ['**']
+    branches: [ '**' ]  # cualquier rama dispara el workflow
   pull_request:
 
 permissions:
@@ -13,7 +13,6 @@ permissions:
 jobs:
   tests:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,7 +20,7 @@ jobs:
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.4'
+          php-version: '8.2'
           extensions: mbstring, bcmath, pdo_sqlite
           coverage: none
 
@@ -38,25 +37,18 @@ jobs:
         run: |
           cp .env.example .env
           php artisan key:generate
-          mkdir -p database
           touch database/database.sqlite
           php artisan migrate --force
 
       - name: Run tests
-        # --no-coverage: no calculem cobertura (més ràpid per a una demo bàsica).
-        # (Laravel invoca PHPUnit o Pest segons la config del projecte.)
-        # DESCOMENTA la línea siguiente para FORZAR QUE LOS TESTS FALLEN (para pruebas de CI):
         run: php artisan test --no-coverage
-
 
   create_pr:
     needs: tests
     if: github.event_name == 'push' && github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
-
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -69,28 +61,36 @@ jobs:
           HEAD_REF="${GITHUB_REF#refs/heads/}"
           echo "Branch actual: $HEAD_REF"
 
-          # 1) Buscar PR existente
-          PR_NUMBER=$(gh pr list --head "$HEAD_REF" --base main --state open --json number --jq '.[0].number')
+          # Buscar PR existente
+          EXISTING=$(gh pr list --state open --base main --head "$HEAD_REF" | head -n 1)
 
-          # 2) Si no existe, crearlo
-          if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+          if [ -z "$EXISTING" ]; then
             echo "No existe PR, creando uno..."
-            PR_NUMBER=$(gh pr create \
+            PR_URL=$(gh pr create \
               --head "$HEAD_REF" \
               --base main \
               --title "Auto PR: $HEAD_REF → main" \
-              --body "Pull request creado automáticamente por CI." \
-              --json number --jq '.number')
-            echo "Creado PR #$PR_NUMBER"
+              --body "Pull request creado automáticamente por CI.")
+            echo "Creado PR: $PR_URL"
           else
-            echo "Encontrado PR existente #$PR_NUMBER"
+            echo "PR existente encontrado:"
+            echo "$EXISTING"
+            PR_URL=$(echo "$EXISTING" | awk '{print $NF}')
           fi
 
-          # 3) Intentar activar auto-merge
-          echo "Activando auto-merge en PR #$PR_NUMBER ..."
+          # Extraer número de PR
+          PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "❌ No se pudo extraer el número de PR"
+            exit 1
+          fi
+
+          echo "PR #$PR_NUMBER procesado"
+
+          echo "Intentando activar auto-merge…"
           if gh pr merge "$PR_NUMBER" --auto --merge; then
-            echo "✔ Auto-merge activado"
-            exit 0
+            echo "✅ Auto-merge activado"
+          else
+            echo "⚠ Auto-merge no disponible aún (checks o protecciones faltan)"
           fi
-
-          echo "⚠ No se pudo activar auto-merge ahora. Es probable que falten checks o protecciones."
