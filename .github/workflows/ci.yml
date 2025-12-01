@@ -69,24 +69,34 @@ jobs:
           echo "Branch actual: $HEAD_REF"
 
           # Buscar PR existente
-          EXISTING=$(gh pr list --state open --base main --head "$HEAD_REF" --json number,url --jq '.[0]')
+          EXISTING=$(gh pr list --state open --base main --head "$HEAD_REF" | head -n 1)
 
           if [ -z "$EXISTING" ]; then
             echo "No existe PR, creando uno..."
-            PR_JSON=$(gh pr create \
+            PR_URL=$(gh pr create \
               --head "$HEAD_REF" \
               --base main \
               --title "Auto PR: $HEAD_REF → main" \
               --body "Pull request creado automáticamente por CI." \
-              --json number,url)
-            PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
-            echo "Creado PR #$PR_NUMBER"
+              --format "{{.url}}")
+            echo "Creado PR: $PR_URL"
           else
-            PR_NUMBER=$(echo "$EXISTING" | jq -r '.number')
-            echo "PR existente encontrado: #$PR_NUMBER"
+            echo "PR existente encontrado:"
+            echo "$EXISTING"
+            PR_URL=$(echo "$EXISTING" | awk '{print $NF}')
           fi
 
-          echo "Intentando activar auto-merge para PR #$PR_NUMBER..."
+          # Extraer número de PR
+          PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "❌ No se pudo extraer el número de PR"
+            exit 1
+          fi
+
+          echo "PR #$PR_NUMBER procesado"
+
+          echo "Intentando activar auto-merge…"
           if gh pr merge "$PR_NUMBER" --auto --merge; then
             echo "✅ Auto-merge activado"
           else
