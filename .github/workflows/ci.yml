@@ -20,12 +20,11 @@
           else
             echo "PR existente encontrado:"
             echo "$EXISTING"
-            PR_URL=$(echo "$EXISTING" | awk '{print $NF}')
             echo "PR ya existe, saliendo sin error."
             exit 0
           fi
 
-          # Extraer número de PR
+          # Extraer número del PR
           PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
 
           if [ -z "$PR_NUMBER" ]; then
@@ -34,8 +33,8 @@
           fi
 
           echo "PR #$PR_NUMBER procesado"
-
           echo "Intentando activar auto-merge…"
+
           if gh pr merge "$PR_NUMBER" --auto --merge; then
             echo "✅ Auto-merge activado"
           else
