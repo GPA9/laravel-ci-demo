@@ -1,4 +1,61 @@
-      - name: Create or find PR + enable auto-merge
+name: CI (Laravel)
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: write
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, bcmath, pdo_sqlite
+          coverage: none
+
+      - name: Cache Composer
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: ${{ runner.os }}-php-${{ hashFiles('**/composer.lock') }}
+
+      - name: Install Composer dependencies
+        run: composer install --no-progress --prefer-dist --optimize-autoloader
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          touch database/database.sqlite
+          php artisan migrate --force
+
+      - name: Run tests
+        run: php artisan test --no-coverage
+
+
+  create_pr:
+    needs: tests
+    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Crear o encontrar PR automáticamente
         shell: bash
         run: |
           set -e
@@ -18,25 +75,17 @@
               --body "Pull request creado automáticamente por CI.")
             echo "Creado PR: $PR_URL"
           else
-            echo "PR existente encontrado:"
-            echo "$EXISTING"
-            echo "PR ya existe, saliendo sin error."
+            echo "PR ya existe, no hago nada."
             exit 0
           fi
 
-          # Extraer número del PR
+          # Extraer número de PR
           PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+          echo "PR #$PR_NUMBER creado"
 
-          if [ -z "$PR_NUMBER" ]; then
-            echo "❌ No se pudo extraer el número de PR"
-            exit 1
-          fi
-
-          echo "PR #$PR_NUMBER procesado"
-          echo "Intentando activar auto-merge…"
-
+          echo "Intentando activar auto-merge..."
           if gh pr merge "$PR_NUMBER" --auto --merge; then
-            echo "✅ Auto-merge activado"
+            echo "Auto-merge activado"
           else
-            echo "⚠ Auto-merge no disponible aún (checks o protecciones faltan)"
+            echo "Auto-merge no disponible aún"
           fi
