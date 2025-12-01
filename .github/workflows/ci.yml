@@ -3,174 +3,92 @@ name: CI (Laravel)
 
 # Bloc que defineix QUAN s’executa el workflow.
 on:
-  # 1) Se dispara en push a cualquier rama (necesario para detectar pushes desde ramas de trabajo).
+  # Es dispara en push a qualsevol branca
   push:
     branches: [ '**' ]
-  # 2) También se dispara cuando se abre/actualiza un pull request.
+  # També es dispara quan s’obre/actualitza un pull request.
   pull_request:
 
-# Permisos necesarios para crear PRs y habilitar auto-merge mediante la API.
-# `pull-requests: write` permite crear PRs; `checks: write` y `contents: write` ayudan con operaciones relacionadas.
+# Permisos necessaris per crear PRs i habilitar auto-merge
 permissions:
   contents: write
   pull-requests: write
   checks: write
 
-# Bloc de feines (jobs) que s’executaran.
 jobs:
-  # Definim un job anomenat 'tests' (el nom és lliure; aquí indica que farà proves).
+  # Job de tests
   tests:
-    # Indiquem a GitHub quin tipus de màquina virtual ha d’usar.
-    # 'ubuntu-latest' és l’últim Ubuntu que ofereix GitHub (normalment la millor opció per PHP).
     runs-on: ubuntu-latest
-
-    # Llista ordenada de passos dins del job 'tests'.
     steps:
-      # Pas 1: descarregar el codi del repositori al runner.
       - name: Checkout
-        # 'uses' vol dir que fem servir una "action" pública del Marketplace.
-        # actions/checkout@v4 clona el repo a la màquina del job.
         uses: actions/checkout@v4
 
-      # Pas 2: instal·lar PHP i extensions necessàries per a Laravel.
       - name: Set up PHP
-        # Action específica per gestionar versions/ext dels PHP Runtimes.
         uses: shivammathur/setup-php@v2
-        # 'with' passa paràmetres a l'action.
         with:
-          # Versió de PHP que volem al runner.
-          php-version: '8.4'
-          # Llista d’extensions que necessitem al projecte.
-          # mbstring i bcmath són habituals a Laravel; pdo_sqlite per fer tests amb SQLite.
+          php-version: '8.2'
           extensions: mbstring, bcmath, pdo_sqlite
-          # Desactivem la cobertura (xdebug) per fer el job més ràpid.
           coverage: none
 
-      # Pas 3: cachejar el directori 'vendor' perquè els 'composer install' siguin molt més ràpids
-      # a execucions futures si no canvia el lockfile.
       - name: Cache Composer
         uses: actions/cache@v4
         with:
-          # 'path' indica què volem cachejar: el directori de dependències PHP.
           path: vendor
-          # 'key' identifica la "clau" del cache. Si canvia, es crea un cache nou.
-          # Fem servir una expressió de GitHub ${{ ... }} per construir la clau.
-          # Afegim el sistema operatiu i el hash del composer.lock (si canvia, el cache deixa de servir).
           key: ${{ runner.os }}-php-${{ hashFiles('**/composer.lock') }}
 
-      # Pas 4: instal·lar les dependències de Composer del projecte.
       - name: Install Composer dependencies
-        # 'run' executa una comanda de shell a la màquina del job.
-        # --no-progress: menys soroll als logs
-        # --prefer-dist: baixa paquets ja empaquetats (més ràpid)
-        # --optimize-autoloader: millora el temps de càrrega en producció/CI
         run: composer install --no-progress --prefer-dist --optimize-autoloader
 
-      # Pas 5: preparar l’entorn de proves.
       - name: Prepare environment
-        # El tub '|' indica "multilínia": executarem aquestes comandes, una rere l’altra, al mateix pas.
         run: |
-          # 5.1 Copiem l'exemple d'entorn a .env (a CI no exposem secrets; usem defaults).
           cp .env.example .env
-          # 5.2 Generem l’APP_KEY necessària per a Laravel (encriptació, sessions, etc.).
           php artisan key:generate
-          # 5.3 Creem la base de dades SQLite (fitxer buit). Ideal per a tests en CI.
           touch database/database.sqlite
-          # 5.4 Apliquem migracions perquè les taules existeixin abans de provar.
-          # --force evita que Artisan demani confirmació en entorns no interactius.
           php artisan migrate --force
 
-      # Pas 6: executar els tests de Laravel.
       - name: Run tests
-        # --no-coverage: no calculem cobertura (més ràpid per a una demo bàsica).
-        # (Laravel invoca PHPUnit o Pest segons la config del projecte.)
-        # DESCOMENTA la línea siguiente para FORZAR QUE LOS TESTS FALLEN (para pruebas de CI):
         run: php artisan test --no-coverage
 
-  # Job que crea (si cal) un Pull Request de la branca actual cap a `main`
-  # i habilita l'auto-merge perquè GitHub faci el merge automàtic quan passin els checks.
+  # Job que crea PR y activa auto-merge
   create_pr:
-    # Espera a que el job de tests acabi satisfactoriament.
     needs: tests
-    # Només cal executar si l'esdeveniment és un push i la branca no és `main`.
     if: github.event_name == 'push' && github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
-    # Compute a token to use: prefer a repository secret `PR_TOKEN` (PAT),
-    # otherwise fall back to the built-in `GITHUB_TOKEN`.
     env:
-      PR_ACT_TOKEN: ${{ secrets.PR_TOKEN && secrets.PR_TOKEN || github.token }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create or find PR and enable auto-merge
-        uses: actions/github-script@v7
-        with:
-          # Use PR_ACT_TOKEN computed above (falls back to GITHUB_TOKEN)
-          github-token: ${{ env.PR_ACT_TOKEN }}
-          script: |
-            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
-            const headRef = process.env.GITHUB_REF.replace('refs/heads/', '');
-            if (headRef === 'main') {
-              core.info('Branch is main; skipping PR creation.');
-              return;
-            }
+      - name: Create or find PR + enable auto-merge
+        shell: bash
+        run: |
+          set -e
 
-            try {
-              // 1) Comprovar si ja existeix un PR obert des d'aquesta branca cap a main
-              const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${headRef}`, base: 'main', state: 'open' });
-              let prNumber;
-              if (existing.data.length > 0) {
-                prNumber = existing.data[0].number;
-                core.info(`Found existing PR #${prNumber}`);
-              } else {
-                // 2) Crear un PR si no existeix
-                const pr = await github.rest.pulls.create({ owner, repo, head: headRef, base: 'main', title: `Auto PR: ${headRef} → main`, body: 'Pull request creado automáticamente por CI.' });
-                prNumber = pr.data.number;
-                core.info(`Created PR #${prNumber}`);
-              }
+          HEAD_REF="${GITHUB_REF#refs/heads/}"
+          echo "Branch actual: $HEAD_REF"
 
-              // 3) Esperar a que el PR esté en estado 'clean' (mergeable_state == 'clean') antes de habilitar auto-merge.
-              // Esto evita errores intermitentes como "Pull request is in unstable status".
-              try {
-                const maxAttempts = 12; // ~2 minutes if interval = 10s
-                const intervalMs = 10000;
-                let attempt = 0;
-                let prGet = null;
-                let mergeableState = null;
-                while (attempt < maxAttempts) {
-                  prGet = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-                  mergeableState = prGet.data.mergeable_state;
-                  core.info(`Attempt ${attempt + 1}/${maxAttempts}: mergeable_state=${mergeableState}`);
-                  if (mergeableState === 'clean') {
-                    break;
-                  }
-                  // If GitHub hasn't computed mergeability yet, retry.
-                  await new Promise(resolve => setTimeout(resolve, intervalMs));
-                  attempt++;
-                }
+          # Buscar PR existente
+          EXISTING=$(gh pr list --state open --base main --head "$HEAD_REF" --json number,url --jq '.[0]')
 
-                if (mergeableState === 'clean') {
-                  const pullRequestId = prGet.data.node_id;
-                  const mutation = `mutation($pullRequestId: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: MERGE}) { pullRequest { number } } }`;
-                  await github.graphql(mutation, { pullRequestId });
-                  core.info('Auto-merge enabled for PR #' + prNumber);
-                } else {
-                  core.warning('Could not enable auto-merge: Pull request is in unstable state (' + mergeableState + ').');
-                }
-              } catch (err) {
-                core.warning('Could not enable auto-merge: ' + err.message);
-              }
-            } catch (err) {
-              // Si GitHub bloquea la creación de PRs con GITHUB_TOKEN, capturamos el 403 y damos instrucciones.
-              const status = err.status || (err.response && err.response.status);
-              if (status === 403) {
-                core.warning('Failed to create PR: GitHub Actions is not permitted to create pull requests with the current token.');
-                core.warning('Options to fix:');
-                core.warning('1) In repository Settings → Actions → General set "Workflow permissions" to "Read and write" and allow Actions to create and approve PRs.');
-                core.warning('2) Or create a Personal Access Token (PAT) with `repo` scope and save it as repository secret `PR_TOKEN`.');
-                core.warning('After adding the secret, re-run the workflow (the job uses `PR_TOKEN` if present).');
-                return;
-              }
-              throw err;
-            }
+          if [ -z "$EXISTING" ]; then
+            echo "No existe PR, creando uno..."
+            PR_JSON=$(gh pr create \
+              --head "$HEAD_REF" \
+              --base main \
+              --title "Auto PR: $HEAD_REF → main" \
+              --body "Pull request creado automáticamente por CI." \
+              --json number,url)
+            PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
+            echo "Creado PR #$PR_NUMBER"
+          else
+            PR_NUMBER=$(echo "$EXISTING" | jq -r '.number')
+            echo "PR existente encontrado: #$PR_NUMBER"
+          fi
+
+          echo "Intentando activar auto-merge para PR #$PR_NUMBER..."
+          if gh pr merge "$PR_NUMBER" --auto --merge; then
+            echo "✅ Auto-merge activado"
+          else
+            echo "⚠ Auto-merge no disponible aún (checks o protecciones faltan)"
+          fi
