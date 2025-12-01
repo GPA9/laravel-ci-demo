@@ -68,25 +68,26 @@ jobs:
           HEAD_REF="${GITHUB_REF#refs/heads/}"
           echo "Branch actual: $HEAD_REF"
 
-          # Buscar PR existente
+          # Buscar PR existente (texto plano)
           EXISTING=$(gh pr list --state open --base main --head "$HEAD_REF" | head -n 1)
 
           if [ -z "$EXISTING" ]; then
             echo "No existe PR, creando uno..."
+            # Crear PR y capturar la URL
             PR_URL=$(gh pr create \
               --head "$HEAD_REF" \
               --base main \
               --title "Auto PR: $HEAD_REF → main" \
-              --body "Pull request creado automáticamente por CI." \
-              --format "{{.url}}")
+              --body "Pull request creado automáticamente por CI." 2>/dev/null | grep -Eo 'https://github\.com/[^ ]+')
             echo "Creado PR: $PR_URL"
           else
             echo "PR existente encontrado:"
             echo "$EXISTING"
+            # Tomar la última columna como URL del PR
             PR_URL=$(echo "$EXISTING" | awk '{print $NF}')
           fi
 
-          # Extraer número de PR
+          # Extraer número de PR de la URL
           PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
 
           if [ -z "$PR_NUMBER" ]; then
@@ -96,6 +97,7 @@ jobs:
 
           echo "PR #$PR_NUMBER procesado"
 
+          # Intentar activar auto-merge
           echo "Intentando activar auto-merge…"
           if gh pr merge "$PR_NUMBER" --auto --merge; then
             echo "✅ Auto-merge activado"
